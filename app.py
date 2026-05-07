@@ -186,6 +186,22 @@ def query():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/sources", methods=["GET"])
+def sources():
+    ns = SHARED_NAMESPACE
+    try:
+        return jsonify({"sources": rag.list_sources(ns)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/stats", methods=["GET"])
+def stats():
+    ns = SHARED_NAMESPACE
+    try:
+        return jsonify(rag.namespace_stats(ns))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
         
 # ---------- Error handlers ----------
 @app.errorhandler(429)
