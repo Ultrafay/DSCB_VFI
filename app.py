@@ -154,9 +154,23 @@ def query():
     if len(question) > 2000:
         return jsonify({"error": "Question too long (max 2000 chars)"}), 400
 
+    # Sanitize history: only valid role + string content, cap length
+    raw_history = data.get("history", [])
+    if not isinstance(raw_history, list):
+        raw_history = []
+    clean_history = [
+        {"role": h["role"], "content": str(h["content"])[:4000]}
+        for h in raw_history
+        if isinstance(h, dict)
+        and h.get("role") in ("user", "assistant")
+        and h.get("content")
+    ][-20:]  # cap at last 20 messages
+
     ns = SHARED_NAMESPACE
     try:
-        answer, sources = rag.rag_query(question, namespace=ns, top_k=top_k)
+        answer, sources = rag.rag_query(
+            question, namespace=ns, top_k=top_k, history=clean_history
+        )
         return jsonify({
             "answer": answer,
             "sources": [
@@ -172,84 +186,7 @@ def query():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/sources", methods=["GET"])
-def sources():
-    ns = SHARED_NAMESPACE
-    try:
-        return jsonify({"sources": rag.list_sources(ns)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/delete", methods=["POST"])
-@limiter.limit("30 per hour")
-@admin_required
-def delete():
-    data = request.get_json(force=True)
-    src = data.get("source")
-    if not src:
-        return jsonify({"error": "Missing 'source'"}), 400
-    ns = SHARED_NAMESPACE
-    deleted = rag.delete_source(src, namespace=ns)
-    return jsonify({"deleted": deleted})
-
-
-@app.route("/api/clear", methods=["POST"])
-@limiter.limit("10 per hour")
-@admin_required
-def clear():
-    ns = SHARED_NAMESPACE
-    ok = rag.clear_namespace(ns)
-    return jsonify({"ok": ok})
-
-
-@app.route("/api/stats", methods=["GET"])
-def stats():
-    ns = SHARED_NAMESPACE
-    try:
-        return jsonify(rag.namespace_stats(ns))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------- Admin routes (token-protected) ----------
-@app.route("/api/admin/namespaces", methods=["GET"])
-@admin_required
-def admin_list_namespaces():
-    try:
-        return jsonify({"namespaces": rag.list_all_namespaces()})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/admin/clear", methods=["POST"])
-@admin_required
-def admin_clear_namespace():
-    data = request.get_json(force=True) or {}
-    ns = data.get("namespace")
-    if not ns:
-        return jsonify({"error": "Missing 'namespace'"}), 400
-    ok = rag.clear_namespace(ns)
-    return jsonify({"ok": ok, "namespace": ns})
-
-
-@app.route("/api/admin/clear-all", methods=["POST"])
-@admin_required
-def admin_clear_all():
-    """Wipe every namespace in the index. Use carefully."""
-    try:
-        all_ns = rag.list_all_namespaces()
-        cleared = []
-        for n in all_ns:
-            if rag.clear_namespace(n["namespace"]):
-                cleared.append(n["namespace"])
-        return jsonify({"cleared": cleared, "count": len(cleared)})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
+        
 # ---------- Error handlers ----------
 @app.errorhandler(429)
 def ratelimit_handler(e):

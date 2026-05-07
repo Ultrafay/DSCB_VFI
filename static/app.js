@@ -1,5 +1,7 @@
 /* ===== State ===== */
 let documents = [];
+let conversationHistory = [];
+const MAX_HISTORY_TURNS = 10; // keep last 10 user+assistant pairs (20 messages)
 
 /* ===== Helpers ===== */
 const $ = id => document.getElementById(id);
@@ -29,7 +31,7 @@ function mdToHtml(text) {
     .replace(/^/, '<p>').replace(/$/, '</p>');
 }
 
-/* ===== Banner dismissal (in-memory only; resets per page load) ===== */
+/* ===== Banner dismissal ===== */
 $('banner-close')?.addEventListener('click', () => {
   document.querySelector('.banner')?.classList.add('hidden');
 });
@@ -146,6 +148,10 @@ async function sendQuery() {
   $('query').value = '';
   autoResize($('query'));
   appendMsg('user', escapeHtml(q));
+
+  // Add user message to history BEFORE sending
+  conversationHistory.push({ role: 'user', content: q });
+
   appendThinking();
   $('send-btn').disabled = true;
 
@@ -153,12 +159,18 @@ async function sendQuery() {
     const res = await fetch('/api/query', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q, top_k: topK })
+      body: JSON.stringify({
+        question: q,
+        top_k: topK,
+        history: conversationHistory.slice(-MAX_HISTORY_TURNS * 2)
+      })
     });
 
     if (res.status === 429) {
       removeThinking();
       appendMsg('ai', `<div class="error-msg">Rate limit hit (30 queries/min). Wait a moment and try again.</div>`);
+      // Roll back user message from history since the request failed
+      conversationHistory.pop();
       return;
     }
 
@@ -166,15 +178,34 @@ async function sendQuery() {
     removeThinking();
     if (data.error) {
       appendMsg('ai', `<div class="error-msg">${escapeHtml(data.error)}</div>`);
+      conversationHistory.pop();
     } else {
-      appendMsg('ai', mdToHtml(data.answer || '(no response)'), data.sources || []);
+      const answer = data.answer || '(no response)';
+      appendMsg('ai', mdToHtml(answer), data.sources || []);
+      // Add assistant message to history
+      conversationHistory.push({ role: 'assistant', content: answer });
     }
   } catch (e) {
     removeThinking();
     appendMsg('ai', `<div class="error-msg">Network error: ${escapeHtml(e.message)}</div>`);
+    conversationHistory.pop();
   } finally {
     $('send-btn').disabled = false;
   }
+}
+
+/* ===== New Chat ===== */
+function newChat() {
+  if (conversationHistory.length === 0) return;
+  if (!confirm('Start a new conversation? Current chat will be cleared.')) return;
+  conversationHistory = [];
+  const area = $('chat-area');
+  area.innerHTML = `
+    <div class="empty-state" id="empty-state">
+      <div class="empty-mark">&#8292;</div>
+      <p class="empty-title">Ask anything about VIFHE</p>
+      <p class="empty-sub">programs &middot; admissions &middot; fees &middot; policies</p>
+    </div>`;
 }
 
 /* ===== Wiring ===== */
@@ -191,6 +222,7 @@ $('query').addEventListener('keydown', e => {
   }
 });
 $('query').addEventListener('input', e => autoResize(e.target));
+$('new-chat-btn')?.addEventListener('click', newChat);
 
 /* ===== Init ===== */
 checkStatus();
