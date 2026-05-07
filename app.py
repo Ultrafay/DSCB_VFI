@@ -1,0 +1,273 @@
+"""
+Hardened Flask backend for public deployment.
+
+Routes:
+  GET  /                       -> UI
+  GET  /api/health             -> health check (Railway uses this)
+  POST /api/upload             -> upload files (per-session namespace)
+  POST /api/query              -> RAG query (per-session namespace)
+  GET  /api/sources            -> list current session's files
+  POST /api/delete             -> delete a single source
+  POST /api/clear              -> clear current session's files
+  GET  /api/stats              -> session vector count
+
+Admin (require Authorization: Bearer <ADMIN_TOKEN>):
+  GET  /api/admin/namespaces   -> list ALL namespaces + vector counts
+  POST /api/admin/clear        -> clear a specific namespace (json body: {namespace})
+  POST /api/admin/clear-all    -> nuke every namespace in the index
+"""
+import os
+import uuid
+import secrets
+import traceback
+from functools import wraps
+
+from flask import Flask, request, jsonify, render_template, session
+from werkzeug.middleware.proxy_fix import ProxyFix
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from dotenv import load_dotenv
+
+load_dotenv()
+
+import rag
+
+# ---------- Config ----------
+MAX_FILE_BYTES = 5 * 1024 * 1024          # 5 MB per file
+MAX_TOTAL_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB per request
+MAX_CHUNKS_PER_UPLOAD = 80                 # caps Pinecone usage per upload
+
+SECRET_KEY = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")  # if empty, admin endpoints are disabled
+
+# ---------- App setup ----------
+app = Flask(__name__)
+app.secret_key = SECRET_KEY
+app.config["MAX_CONTENT_LENGTH"] = MAX_TOTAL_UPLOAD_BYTES
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("FLASK_ENV") == "production"
+app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 30  # 30 days
+
+# Trust Railway's reverse proxy for correct client IPs
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+# Rate limiter (in-memory; swap to Redis if you scale beyond 1 worker)
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["120 per hour"],
+    storage_uri="memory://",
+)
+
+# ---------- Session helpers ----------
+def get_session_namespace() -> str:
+    """Each browser session gets a unique Pinecone namespace."""
+    if "ns" not in session:
+        session.permanent = True
+        session["ns"] = f"u-{uuid.uuid4().hex[:16]}"
+    return session["ns"]
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*a, **kw):
+        if not ADMIN_TOKEN:
+            return jsonify({"error": "Admin endpoints disabled (no ADMIN_TOKEN configured)"}), 403
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[7:] != ADMIN_TOKEN:
+            return jsonify({"error": "Unauthorized"}), 401
+        return fn(*a, **kw)
+    return wrapper
+
+
+# ---------- Public routes ----------
+@app.route("/")
+def home():
+    get_session_namespace()  # ensure session cookie is set on first visit
+    return render_template("index.html")
+
+
+@app.route("/api/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/upload", methods=["POST"])
+@limiter.limit("8 per hour")
+def upload():
+    files = request.files.getlist("files")
+    if not files:
+        return jsonify({"error": "No files provided"}), 400
+
+    ns = get_session_namespace()
+    results = []
+    total_chunks = 0
+
+    for f in files:
+        try:
+            raw = f.read()
+            if len(raw) > MAX_FILE_BYTES:
+                results.append({
+                    "filename": f.filename,
+                    "error": f"File exceeds {MAX_FILE_BYTES // (1024*1024)}MB limit",
+                })
+                continue
+
+            text = rag.read_file(f.filename, raw)
+            chunks = rag.chunk_text(text, source=f.filename)
+
+            if not chunks:
+                results.append({"filename": f.filename, "error": "No extractable text"})
+                continue
+
+            remaining = MAX_CHUNKS_PER_UPLOAD - total_chunks
+            if remaining <= 0:
+                results.append({
+                    "filename": f.filename,
+                    "error": f"Per-upload chunk limit reached ({MAX_CHUNKS_PER_UPLOAD})",
+                })
+                continue
+
+            if len(chunks) > remaining:
+                chunks = chunks[:remaining]
+                truncated = True
+            else:
+                truncated = False
+
+            uploaded = rag.upload_chunks(chunks, namespace=ns)
+            total_chunks += uploaded
+            results.append({
+                "filename": f.filename,
+                "chunks": uploaded,
+                "chars": len(text),
+                "truncated": truncated,
+            })
+        except Exception as e:
+            traceback.print_exc()
+            results.append({"filename": f.filename, "error": str(e)})
+
+    return jsonify({"results": results})
+
+
+@app.route("/api/query", methods=["POST"])
+@limiter.limit("30 per minute")
+def query():
+    data = request.get_json(force=True)
+    question = (data.get("question") or "").strip()
+    top_k = max(1, min(int(data.get("top_k", 5)), 15))
+
+    if not question:
+        return jsonify({"error": "Empty question"}), 400
+    if len(question) > 2000:
+        return jsonify({"error": "Question too long (max 2000 chars)"}), 400
+
+    ns = get_session_namespace()
+    try:
+        answer, sources = rag.rag_query(question, namespace=ns, top_k=top_k)
+        return jsonify({
+            "answer": answer,
+            "sources": [
+                {
+                    "source": s["source"],
+                    "chunk_index": s["chunk_index"],
+                    "score": round(s["score"], 4),
+                    "preview": s["text"][:200] + ("..." if len(s["text"]) > 200 else ""),
+                }
+                for s in sources
+            ],
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/sources", methods=["GET"])
+def sources():
+    ns = get_session_namespace()
+    try:
+        return jsonify({"sources": rag.list_sources(ns)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/delete", methods=["POST"])
+@limiter.limit("30 per hour")
+def delete():
+    data = request.get_json(force=True)
+    src = data.get("source")
+    if not src:
+        return jsonify({"error": "Missing 'source'"}), 400
+    ns = get_session_namespace()
+    deleted = rag.delete_source(src, namespace=ns)
+    return jsonify({"deleted": deleted})
+
+
+@app.route("/api/clear", methods=["POST"])
+@limiter.limit("10 per hour")
+def clear():
+    ns = get_session_namespace()
+    ok = rag.clear_namespace(ns)
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/stats", methods=["GET"])
+def stats():
+    ns = get_session_namespace()
+    try:
+        return jsonify(rag.namespace_stats(ns))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------- Admin routes (token-protected) ----------
+@app.route("/api/admin/namespaces", methods=["GET"])
+@admin_required
+def admin_list_namespaces():
+    try:
+        return jsonify({"namespaces": rag.list_all_namespaces()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/admin/clear", methods=["POST"])
+@admin_required
+def admin_clear_namespace():
+    data = request.get_json(force=True) or {}
+    ns = data.get("namespace")
+    if not ns:
+        return jsonify({"error": "Missing 'namespace'"}), 400
+    ok = rag.clear_namespace(ns)
+    return jsonify({"ok": ok, "namespace": ns})
+
+
+@app.route("/api/admin/clear-all", methods=["POST"])
+@admin_required
+def admin_clear_all():
+    """Wipe every namespace in the index. Use carefully."""
+    try:
+        all_ns = rag.list_all_namespaces()
+        cleared = []
+        for n in all_ns:
+            if rag.clear_namespace(n["namespace"]):
+                cleared.append(n["namespace"])
+        return jsonify({"cleared": cleared, "count": len(cleared)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------- Error handlers ----------
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({"error": f"Rate limit exceeded: {e.description}"}), 429
+
+
+@app.errorhandler(413)
+def payload_too_large(e):
+    return jsonify({"error": f"Upload too large (max {MAX_TOTAL_UPLOAD_BYTES // (1024*1024)}MB total)"}), 413
+
+
+# ---------- Local dev entry ----------
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", os.getenv("FLASK_PORT", 5000)))
+    print(f"\n  → Open http://localhost:{port}\n")
+    app.run(host="0.0.0.0", port=port, debug=True)

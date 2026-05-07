@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pinecone × DeepSeek RAG</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<header>
+  <div class="logo">PINECONE<span>×DEEPSEEK</span></div>
+  <div class="divider"></div>
+  <span class="tag">retrieval-augmented generation</span>
+  <div class="status" id="status">
+    <span class="dot" id="status-dot"></span>
+    <span id="status-text">connecting...</span>
+  </div>
+</header>
+
+<div class="banner">
+  <span class="banner-icon">⚠</span>
+  <span>Demo app · don't upload sensitive data · your files are private to your browser session</span>
+  <button class="banner-close" id="banner-close" title="Dismiss">×</button>
+</div>
+
+<aside>
+  <div class="aside-header">
+    <h2>Documents</h2>
+    <span class="badge" id="vec-badge">0 vectors</span>
+  </div>
+
+  <label class="drop-zone" id="drop-zone">
+    <div class="drop-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+      </svg>
+    </div>
+    <p class="drop-main">Drop files or click</p>
+    <p class="drop-sub">.txt .md .pdf .csv .json .js .py</p>
+    <p class="drop-limits">max 5MB / file · 80 chunks / upload</p>
+    <input type="file" id="file-input" multiple
+           accept=".txt,.md,.pdf,.csv,.json,.html,.js,.ts,.py,.jsx,.tsx,.xml,.yaml,.yml,.toml,.sql,.sh,.css,.log">
+  </label>
+
+  <div id="upload-progress"></div>
+
+  <div class="doc-list" id="doc-list"></div>
+
+  <div class="aside-footer">
+    <button class="ghost-btn" id="refresh-btn" title="Refresh source list">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+      </svg>
+      refresh
+    </button>
+    <button class="ghost-btn danger" id="clear-btn" title="Delete all your documents">
+      clear all
+    </button>
+  </div>
+</aside>
+
+<main>
+  <div class="chat-area" id="chat-area">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-mark">⌗</div>
+      <p class="empty-title">Upload documents, then ask anything.</p>
+      <p class="empty-sub">Pinecone embeds &amp; stores · DeepSeek answers</p>
+    </div>
+  </div>
+
+  <div class="input-bar">
+    <div class="query-wrap">
+      <textarea id="query" rows="1" placeholder="Ask a question about your documents…" maxlength="2000"></textarea>
+      <div class="topk-row">
+        top <input id="topk" type="number" min="1" max="15" value="5"> chunks
+      </div>
+    </div>
+    <button class="send-btn" id="send-btn" title="Send (Enter)">
+      <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2z"/></svg>
+    </button>
+  </div>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
