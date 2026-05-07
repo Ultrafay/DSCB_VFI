@@ -84,26 +84,28 @@ def upload_chunks(chunks: List[Dict], namespace: str) -> int:
     ]
     for i in range(0, len(records), BATCH_SIZE):
         batch = records[i:i + BATCH_SIZE]
-        index.upsert_records(namespace, batch)
+        index.upsert_records(namespace=namespace, records=batch)
     return len(records)
 
 
 # -------- Search --------
 def search(query: str, namespace: str, top_k: int = 5) -> List[Dict]:
     index = get_index()
-    res = index.search(
+    res = index.search_records(
         namespace=namespace,
-        query={"top_k": top_k, "inputs": {"text": query}},
+        top_k=top_k,
+        inputs={"text": query},
         fields=["text", "source", "chunk_index"],
     )
-    hits = res.get("result", {}).get("hits", [])
+    data = res.to_dict() if hasattr(res, "to_dict") else res
+    hits = data.get("result", {}).get("hits", [])
     return [
         {
-            "id": h["_id"],
-            "score": h.get("_score", 0),
-            "text": h["fields"].get("text", ""),
-            "source": h["fields"].get("source", "unknown"),
-            "chunk_index": h["fields"].get("chunk_index", 0),
+            "id": h.get("id_", h.get("_id", "")),
+            "score": h.get("score_", h.get("_score", 0)),
+            "text": h.get("fields", {}).get("text", ""),
+            "source": h.get("fields", {}).get("source", "unknown"),
+            "chunk_index": h.get("fields", {}).get("chunk_index", 0),
         }
         for h in hits
     ]
@@ -125,10 +127,11 @@ def list_sources(namespace: str) -> List[Dict]:
     index = get_index()
     sources = {}
     try:
-        for ids_page in index.list(namespace=namespace, limit=99):
-            if not ids_page:
+        for page in index.list(namespace=namespace, limit=99):
+            if not page or not page.vectors:
                 continue
-            fetched = index.fetch(ids=list(ids_page), namespace=namespace)
+            ids = [v.id for v in page.vectors]
+            fetched = index.fetch(ids=ids, namespace=namespace)
             for vid, vec in fetched.vectors.items():
                 meta = vec.metadata or {}
                 src = meta.get("source", "unknown")
@@ -142,11 +145,11 @@ def delete_source(source: str, namespace: str) -> int:
     index = get_index()
     deleted = 0
     try:
-        for ids_page in index.list(namespace=namespace, limit=99):
-            if not ids_page:
+        for page in index.list(namespace=namespace, limit=99):
+            if not page or not page.vectors:
                 continue
-            ids_list = list(ids_page)
-            fetched = index.fetch(ids=ids_list, namespace=namespace)
+            ids = [v.id for v in page.vectors]
+            fetched = index.fetch(ids=ids, namespace=namespace)
             to_delete = [
                 vid for vid, vec in fetched.vectors.items()
                 if (vec.metadata or {}).get("source") == source
@@ -194,10 +197,13 @@ def chat_with_llm(question: str, context_chunks: List[Dict]) -> str:
         context = "(No relevant documents found.)"
 
     system_prompt = (
-        "You are a helpful assistant answering questions based on the provided document context. "
-        "Use only the information in the context. If the context doesn't contain the answer, say so. "
-        "When useful, cite sources by filename in square brackets, e.g. [report.pdf]. "
-        "Be concise and precise.\n\n"
+        "You are the VIFHE Support assistant \u2014 friendly, concise, and helpful. "
+        "Answer questions about VIFHE programs, admissions, fees, courses, and policies "
+        "using ONLY the information in the provided context below. "
+        "If the answer is not in the context, politely say you don't have that information "
+        "and suggest the user contact VIFHE directly. "
+        "Do not include citations, source filenames, or chunk references in your answer. "
+        "Keep responses short and natural \u2014 like a helpful staff member, not a search engine.\n\n"
         f"CONTEXT:\n{context}"
     )
 

@@ -1,12 +1,12 @@
-# Pinecone + DeepSeek RAG — Production Build
+# VIFHE Support Chatbot
 
-Public-facing RAG app:
+AI-powered support chatbot for VIFHE (Virtual Institute for Higher Education):
 - **Pinecone** stores vectors + does embeddings (free tier, hosted model)
 - **DeepSeek** generates answers
 - **Flask + gunicorn** backend, Railway-ready
-- **Per-session namespaces** so users only see their own files
+- **Shared knowledge base** — admin pre-loads files, visitors query
 - **Rate limits + file caps** so a bot can't drain your wallet
-- **Admin endpoints** so you can wipe namespaces remotely
+- **Admin endpoints** so you can manage the knowledge base remotely
 
 ---
 
@@ -35,6 +35,28 @@ python app.py
 
 ---
 
+## Loading the knowledge base
+
+Use `admin_upload.py` to manage the shared knowledge base that all visitors query against.
+
+```bash
+# Upload files
+python admin_upload.py vifhe_files/admissions.pdf vifhe_files/programs.md
+
+# List what's loaded
+python admin_upload.py --list
+
+# Remove a specific file
+python admin_upload.py --delete admissions.pdf
+
+# Wipe the entire knowledge base
+python admin_upload.py --clear
+```
+
+Visitors of the web app will query whatever is in this shared namespace (`vifhe-kb` by default). They cannot upload, delete, or modify files — only ask questions.
+
+---
+
 ## Deploy to Railway
 
 See **`RAILWAY.md`** for step-by-step deployment.
@@ -45,7 +67,7 @@ See **`RAILWAY.md`** for step-by-step deployment.
 
 | Protection | Limit | Where to change |
 |---|---|---|
-| Per-session privacy | Each browser gets isolated Pinecone namespace | `app.py` → `get_session_namespace()` |
+| Admin-only uploads | Upload/delete/clear require `ADMIN_TOKEN` | `app.py` → `@admin_required` |
 | Query rate limit | 30 / min / IP | `app.py` → `@limiter.limit("30 per minute")` |
 | Upload rate limit | 8 / hour / IP | `app.py` → `@limiter.limit("8 per hour")` |
 | File size | 5 MB / file | `app.py` → `MAX_FILE_BYTES` |
@@ -72,7 +94,7 @@ curl https://your-app.up.railway.app/api/admin/namespaces \
 curl -X POST https://your-app.up.railway.app/api/admin/clear \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"namespace": "u-abc123def456"}'
+  -d '{"namespace": "vifhe-kb"}'
 
 # Nuke ALL namespaces (use with care)
 curl -X POST https://your-app.up.railway.app/api/admin/clear-all \
@@ -93,7 +115,8 @@ pinecone-deepseek-rag/
 ├── .env.example
 ├── .gitignore
 ├── setup_index.py         # one-time index creation
-├── app.py                 # Flask routes + sessions + rate limiting
+├── admin_upload.py        # CLI tool to load knowledge base
+├── app.py                 # Flask routes + rate limiting
 ├── rag.py                 # chunking + Pinecone + DeepSeek
 ├── static/
 │   ├── style.css
@@ -107,20 +130,19 @@ pinecone-deepseek-rag/
 ## How it works
 
 ```
-First visit       → Flask sets a session cookie → namespace "u-<random>" assigned
-Upload file       → chunked → Pinecone embeds + stores in YOUR namespace
-Query             → Pinecone embeds query → searches YOUR namespace only
-                  → top-k chunks sent to DeepSeek as context
-                  → answer streamed back with source citations
+Admin runs admin_upload.py  → files chunked → Pinecone embeds + stores in "vifhe-kb" namespace
+Visitor asks a question     → Pinecone embeds query → searches shared namespace
+                            → top-k chunks sent to DeepSeek as context
+                            → answer returned (no source citations shown)
 ```
 
-Different visitors = different namespaces = total isolation.
+All visitors query the same shared knowledge base. No per-session isolation — the knowledge base is curated by the admin.
 
 ---
 
 ## Monitoring
 
-You said no kill switch — so monitor manually:
+Monitor these dashboards regularly:
 - **DeepSeek dashboard:** https://platform.deepseek.com → check usage daily
 - **Pinecone dashboard:** https://app.pinecone.io → vector count + namespace list
 - **Railway dashboard:** logs + bandwidth

@@ -69,7 +69,7 @@ function renderDocs() {
   const list = $('doc-list');
   list.innerHTML = '';
   if (!documents.length) {
-    list.innerHTML = `<p style="text-align:center;color:var(--muted);font-size:11px;padding:20px;font-family:var(--mono)">no documents yet</p>`;
+    list.innerHTML = `<p style="text-align:center;color:var(--muted);font-size:11px;padding:20px;font-family:var(--mono)">loading knowledge base...</p>`;
     return;
   }
   documents.forEach(d => {
@@ -81,89 +81,9 @@ function renderDocs() {
         <div class="doc-name" title="${escapeHtml(d.source)}">${escapeHtml(d.source)}</div>
         <div class="doc-sub">${d.chunk_count} chunks</div>
       </div>
-      <div class="doc-del" title="Delete">×</div>
     `;
-    div.querySelector('.doc-del').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Delete "${d.source}" from your vector store?`)) return;
-      const res = await fetch('/api/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: d.source })
-      });
-      if (res.status === 429) {
-        alert('Rate limit hit — slow down a bit.');
-        return;
-      }
-      const r = await res.json();
-      if (r.deleted >= 0) {
-        await loadSources();
-        await checkStatus();
-      }
-    });
     list.appendChild(div);
   });
-}
-
-/* ===== Upload ===== */
-async function uploadFiles(files) {
-  if (!files.length) return;
-
-  const progress = $('upload-progress');
-  const items = [];
-  for (const f of files) {
-    const item = document.createElement('div');
-    item.className = 'upload-item pending';
-    item.innerHTML = `<div class="upload-spinner"></div><span>${escapeHtml(f.name)}</span>`;
-    progress.appendChild(item);
-    items.push(item);
-  }
-
-  const fd = new FormData();
-  for (const f of files) fd.append('files', f);
-
-  try {
-    const res = await fetch('/api/upload', { method: 'POST', body: fd });
-
-    if (res.status === 429) {
-      items.forEach(i => {
-        i.className = 'upload-item error';
-        i.innerHTML = '<span>✗ rate limit hit (8 uploads / hour)</span>';
-        setTimeout(() => i.remove(), 4000);
-      });
-      return;
-    }
-    if (res.status === 413) {
-      items.forEach(i => {
-        i.className = 'upload-item error';
-        i.innerHTML = '<span>✗ upload too large (max 20MB total)</span>';
-        setTimeout(() => i.remove(), 4000);
-      });
-      return;
-    }
-
-    const data = await res.json();
-    (data.results || []).forEach((r, idx) => {
-      const item = items[idx];
-      if (r.error) {
-        item.className = 'upload-item error';
-        item.innerHTML = `<span>✗ ${escapeHtml(r.filename)}: ${escapeHtml(r.error)}</span>`;
-      } else {
-        item.className = 'upload-item success';
-        const trunc = r.truncated ? ' (truncated)' : '';
-        item.innerHTML = `<span>✓ ${escapeHtml(r.filename)} (${r.chunks} chunks${trunc})</span>`;
-      }
-      setTimeout(() => item.remove(), 4000);
-    });
-    await loadSources();
-    await checkStatus();
-    $('empty-state')?.remove();
-  } catch (e) {
-    items.forEach(i => {
-      i.className = 'upload-item error';
-      i.innerHTML = `<span>✗ upload failed: ${escapeHtml(e.message)}</span>`;
-    });
-  }
 }
 
 /* ===== Chat ===== */
@@ -221,7 +141,7 @@ function removeThinking() { $('thinking-msg')?.remove(); }
 async function sendQuery() {
   const q = $('query').value.trim();
   if (!q) return;
-  const topK = parseInt($('topk').value) || 5;
+  const topK = 5;
 
   $('query').value = '';
   autoResize($('query'));
@@ -263,25 +183,6 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 
-const dropZone = $('drop-zone');
-const fileInput = $('file-input');
-
-dropZone.addEventListener('click', () => fileInput.click());
-dropZone.addEventListener('dragover', e => {
-  e.preventDefault();
-  dropZone.classList.add('drag-over');
-});
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
-dropZone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  uploadFiles([...e.dataTransfer.files]);
-});
-fileInput.addEventListener('change', () => {
-  uploadFiles([...fileInput.files]);
-  fileInput.value = '';
-});
-
 $('send-btn').addEventListener('click', sendQuery);
 $('query').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -290,21 +191,6 @@ $('query').addEventListener('keydown', e => {
   }
 });
 $('query').addEventListener('input', e => autoResize(e.target));
-
-$('refresh-btn').addEventListener('click', async () => {
-  await loadSources();
-  await checkStatus();
-});
-$('clear-btn').addEventListener('click', async () => {
-  if (!confirm('Delete all YOUR documents from the vector store? This cannot be undone.')) return;
-  const res = await fetch('/api/clear', { method: 'POST' });
-  if (res.status === 429) {
-    alert('Rate limit hit on clear endpoint.');
-    return;
-  }
-  await loadSources();
-  await checkStatus();
-});
 
 /* ===== Init ===== */
 checkStatus();

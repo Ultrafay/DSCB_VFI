@@ -1,15 +1,15 @@
 """
-Hardened Flask backend for public deployment.
+VIFHE Support chatbot — Flask backend.
 
 Routes:
   GET  /                       -> UI
   GET  /api/health             -> health check (Railway uses this)
-  POST /api/upload             -> upload files (per-session namespace)
-  POST /api/query              -> RAG query (per-session namespace)
-  GET  /api/sources            -> list current session's files
-  POST /api/delete             -> delete a single source
-  POST /api/clear              -> clear current session's files
-  GET  /api/stats              -> session vector count
+  POST /api/upload             -> upload files (admin only)
+  POST /api/query              -> RAG query (public)
+  GET  /api/sources            -> list knowledge base files (public)
+  POST /api/delete             -> delete a single source (admin only)
+  POST /api/clear              -> clear knowledge base (admin only)
+  GET  /api/stats              -> vector count (public)
 
 Admin (require Authorization: Bearer <ADMIN_TOKEN>):
   GET  /api/admin/namespaces   -> list ALL namespaces + vector counts
@@ -17,12 +17,11 @@ Admin (require Authorization: Bearer <ADMIN_TOKEN>):
   POST /api/admin/clear-all    -> nuke every namespace in the index
 """
 import os
-import uuid
 import secrets
 import traceback
 from functools import wraps
 
-from flask import Flask, request, jsonify, render_template, session
+from flask import Flask, request, jsonify, render_template
 from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -36,6 +35,7 @@ import rag
 MAX_FILE_BYTES = 5 * 1024 * 1024          # 5 MB per file
 MAX_TOTAL_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB per request
 MAX_CHUNKS_PER_UPLOAD = 80                 # caps Pinecone usage per upload
+SHARED_NAMESPACE = os.getenv("SHARED_NAMESPACE", "vifhe-kb")
 
 SECRET_KEY = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")  # if empty, admin endpoints are disabled
@@ -60,14 +60,7 @@ limiter = Limiter(
     storage_uri="memory://",
 )
 
-# ---------- Session helpers ----------
-def get_session_namespace() -> str:
-    """Each browser session gets a unique Pinecone namespace."""
-    if "ns" not in session:
-        session.permanent = True
-        session["ns"] = f"u-{uuid.uuid4().hex[:16]}"
-    return session["ns"]
-
+# ---------- Auth helper ----------
 def admin_required(fn):
     @wraps(fn)
     def wrapper(*a, **kw):
@@ -83,7 +76,6 @@ def admin_required(fn):
 # ---------- Public routes ----------
 @app.route("/")
 def home():
-    get_session_namespace()  # ensure session cookie is set on first visit
     return render_template("index.html")
 
 
@@ -94,12 +86,13 @@ def health():
 
 @app.route("/api/upload", methods=["POST"])
 @limiter.limit("8 per hour")
+@admin_required
 def upload():
     files = request.files.getlist("files")
     if not files:
         return jsonify({"error": "No files provided"}), 400
 
-    ns = get_session_namespace()
+    ns = SHARED_NAMESPACE
     results = []
     total_chunks = 0
 
@@ -161,7 +154,7 @@ def query():
     if len(question) > 2000:
         return jsonify({"error": "Question too long (max 2000 chars)"}), 400
 
-    ns = get_session_namespace()
+    ns = SHARED_NAMESPACE
     try:
         answer, sources = rag.rag_query(question, namespace=ns, top_k=top_k)
         return jsonify({
@@ -183,7 +176,7 @@ def query():
 
 @app.route("/api/sources", methods=["GET"])
 def sources():
-    ns = get_session_namespace()
+    ns = SHARED_NAMESPACE
     try:
         return jsonify({"sources": rag.list_sources(ns)})
     except Exception as e:
@@ -192,27 +185,29 @@ def sources():
 
 @app.route("/api/delete", methods=["POST"])
 @limiter.limit("30 per hour")
+@admin_required
 def delete():
     data = request.get_json(force=True)
     src = data.get("source")
     if not src:
         return jsonify({"error": "Missing 'source'"}), 400
-    ns = get_session_namespace()
+    ns = SHARED_NAMESPACE
     deleted = rag.delete_source(src, namespace=ns)
     return jsonify({"deleted": deleted})
 
 
 @app.route("/api/clear", methods=["POST"])
 @limiter.limit("10 per hour")
+@admin_required
 def clear():
-    ns = get_session_namespace()
+    ns = SHARED_NAMESPACE
     ok = rag.clear_namespace(ns)
     return jsonify({"ok": ok})
 
 
 @app.route("/api/stats", methods=["GET"])
 def stats():
-    ns = get_session_namespace()
+    ns = SHARED_NAMESPACE
     try:
         return jsonify(rag.namespace_stats(ns))
     except Exception as e:
@@ -269,5 +264,5 @@ def payload_too_large(e):
 # ---------- Local dev entry ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", os.getenv("FLASK_PORT", 5000)))
-    print(f"\n  → Open http://localhost:{port}\n")
+    print(f"\n  -> Open http://localhost:{port}\n")
     app.run(host="0.0.0.0", port=port, debug=True)

@@ -84,16 +84,23 @@ You should see the UI with a green status dot. Upload a file, ask a question, co
 
 ---
 
-## Step 6 — Test isolation
+## Step 6 — Load the knowledge base
 
-This is critical for public deployment:
+Before visitors can ask questions, you need to populate the shared namespace with VIFHE files.
 
-1. Open the app in your normal browser → upload `test1.txt`
-2. Open the app in **incognito/private window** → you should see **0 documents**
-3. Upload `test2.txt` in incognito → query
-4. Switch back to normal browser → query → should still only see `test1.txt`
+Run `admin_upload.py` locally with your production `.env` values:
 
-If both windows see each other's files, sessions aren't working — check `FLASK_SECRET_KEY` is set.
+```bash
+# Upload files to the shared namespace
+python admin_upload.py vifhe_files/admissions.pdf vifhe_files/programs.md
+
+# Verify what's loaded
+python admin_upload.py --list
+```
+
+Then refresh your Railway URL — the sidebar should show the uploaded files under "Knowledge Base".
+
+> The same Pinecone index is used by both local dev and Railway, so files uploaded locally are immediately visible on Railway (and vice versa). No separate step needed.
 
 ---
 
